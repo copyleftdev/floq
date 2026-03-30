@@ -1,0 +1,10 @@
+# Zig build artifacts
+zig-out/
+.zig-cache/
+
+# Downloaded pcap datasets (large, not ours to redistribute)
+test-data/*.pcap
+
+# Generated test artifacts
+test-data/chaos-needle-manifest.json
+test-data/test-beacon.jsonl

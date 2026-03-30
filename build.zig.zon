@@ -1,0 +1,10 @@
+.{
+    .name = .floq,
+    .version = "0.1.0",
+    .fingerprint = 0xbba373457f422a7a,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
