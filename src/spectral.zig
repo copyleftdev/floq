@@ -6,10 +6,13 @@ const math = std.math;
 /// Given inter-arrival times s_i = t_{i+1} - t_i, compute:
 ///   r_i = min(s_i, s_{i+1}) / max(s_i, s_{i+1})
 ///
-/// Mean r ≈ 0.386 for Poisson (random/no structure)
-/// Mean r ≈ 0.530 for GOE (correlated/structured — beacon-like)
+/// Mean r = 2ln2-1 ≈ 0.386 for Poisson (random/no structure)
+/// Mean r -> 1.0 for a regular "picket fence" (periodic — beacon-like);
+/// jitter pulls it back toward the Poisson value.
 ///
-/// Derived from quantum chaos diagnostics: Sachdev-Ye-Kitaev spectral statistics.
+/// The r-statistic is scale-invariant and purely local (consecutive pairs),
+/// so it is robust to slow interval drift, unlike a global CV.
+/// Diagnostic from random matrix theory: Oganesyan & Huse (2007), Atas et al. (2013).
 pub fn levelSpacingRatio(timestamps: []const f64) ?f64 {
     if (timestamps.len < 3) return null;
 
@@ -55,14 +58,19 @@ fn autocorrelation(spacings: []const f64, lag: usize, mean: f64) f64 {
     return num / den;
 }
 
-/// Find the dominant period via autocorrelation peak detection.
-/// Returns (estimated_interval, peak_strength).
+/// Detect statistically significant structure in the spacing sequence.
+/// Returns (estimated_interval, significance in [0,1]).
 ///
-/// Inspired by Floquet quasi-energy analysis: periodic drives create
-/// discrete peaks in the autocorrelation function, analogous to
-/// quasi-energy degeneracies in the Floquet spectrum.
-pub fn detectPeriodicity(timestamps: []const f64) struct { interval: f64, peak: f64 } {
-    if (timestamps.len < 4) return .{ .interval = 0, .peak = 0 };
+/// A beacon with independent per-sleep jitter produces i.i.d. spacings, whose
+/// population ACF is zero at every lag — so a raw ACF maximum is just the max
+/// of ~L noisy estimates and rewards small samples. Instead, the best peak is
+/// compared against its null distribution: for structureless spacings the
+/// sample ACF at one lag is ~N(0, 1/m), so the max over L lags concentrates
+/// near sqrt(2 ln L / m). Only the excess above that noise floor counts as
+/// evidence, which makes the significance grow with sample count instead of
+/// shrinking.
+pub fn detectPeriodicity(timestamps: []const f64) struct { interval: f64, significance: f64 } {
+    if (timestamps.len < 4) return .{ .interval = 0, .significance = 0 };
 
     const n_spacings = timestamps.len - 1;
 
@@ -90,14 +98,24 @@ pub fn detectPeriodicity(timestamps: []const f64) struct { interval: f64, peak: 
         }
     }
 
-    // Estimated interval = mean spacing * best lag period
-    // (if lag=1 has highest ACF, that means consecutive spacings are correlated,
-    //  suggesting a regular interval ≈ mean spacing)
-    const estimated_interval = mean * @as(f64, @floatFromInt(best_lag));
+    // Null-calibrated significance: z-score of the peak minus the expected
+    // max-of-noise, scaled so ~3 sigma of excess earns full credit.
+    const m = @as(f64, @floatFromInt(spacings.len));
+    const z = best_acf * @sqrt(m);
+    const z_null = @sqrt(2.0 * @log(@as(f64, @floatFromInt(@max(max_lag, 2)))));
+    const sig = math.clamp((z - z_null) / 3.0, 0.0, 1.0);
+
+    // A significant peak at lag L means the spacing sequence repeats every L
+    // steps, so the flow's periodic block is L * mean. Without a significant
+    // peak, the best interval estimate is simply the mean spacing.
+    const estimated_interval = if (sig > 0)
+        mean * @as(f64, @floatFromInt(best_lag))
+    else
+        mean;
 
     return .{
         .interval = estimated_interval,
-        .peak = @max(best_acf, 0.0),
+        .significance = sig,
     };
 }
 
@@ -125,28 +143,34 @@ pub fn jitterRatio(timestamps: []const f64) f64 {
     return std_dev / mean;
 }
 
-/// Compute composite Floquet beacon score [0, 1].
+/// Compute composite beacon score [0, 1].
 ///
-/// Combines three signals:
-///   1. LSR deviation from Poisson toward GOE (structure in timing)
-///   2. Autocorrelation peak strength (periodicity) — strongest discriminator
+/// Combines three signals and one penalty:
+///   1. LSR regularity: Poisson baseline (2ln2-1 ≈ 0.386) -> 0, perfectly
+///      regular "picket fence" spacings (r = 1) -> 1. Local pairwise ratios
+///      make this robust to slow interval drift, unlike a global CV.
+///   2. Spacing-structure significance (null-calibrated, see detectPeriodicity)
 ///   3. Inverse jitter ratio (regularity)
+///   4. Overdispersion penalty: CV > 1 is super-Poisson (bursts, backoff
+///      retries) — more irregular than random, which no periodic beacon is.
 ///
-/// Weights tuned against CTU-42 (Neris), CTU-46 (Virut), CTU-48 (Sogou).
-/// A pure random process scores ~0. A perfect periodic beacon scores ~1.
-pub fn beaconScore(lsr: f64, acf_peak: f64, jitter: f64) f64 {
-    // LSR component: 0.386 (Poisson) -> 0.0, 0.530 (GOE) -> 1.0
-    const lsr_norm = math.clamp((lsr - 0.386) / (0.530 - 0.386), 0.0, 1.0);
+/// A pure random process scores ~0.15. A perfect periodic beacon scores ~1.
+pub fn beaconScore(lsr: f64, period_sig: f64, jitter: f64) f64 {
+    // LSR component: 0.386 (Poisson) -> 0.0, 1.0 (clean beacon) -> 1.0
+    const lsr_norm = math.clamp((lsr - 0.386) / (1.0 - 0.386), 0.0, 1.0);
 
-    // ACF component: direct [0,1]
-    const acf_norm = math.clamp(acf_peak, 0.0, 1.0);
+    // Structure component: already a calibrated [0,1] significance
+    const sig_norm = math.clamp(period_sig, 0.0, 1.0);
 
     // Jitter component: smooth inverse decay (no hard clip at 1.0)
     // jitter=0 -> 1.0, jitter=1 -> 0.5, jitter=3 -> 0.25
     const jitter_norm = 1.0 / (1.0 + jitter);
 
-    // Weighted combination: ACF-heavy, tuned on 3 malware families
-    return 0.30 * lsr_norm + 0.50 * acf_norm + 0.20 * jitter_norm;
+    // Overdispersion penalty: 0 at CV <= 1, full at CV >= 3
+    const burst_pen = math.clamp((jitter - 1.0) / 2.0, 0.0, 1.0);
+
+    const score = 0.45 * lsr_norm + 0.25 * sig_norm + 0.30 * jitter_norm - 0.20 * burst_pen;
+    return math.clamp(score, 0.0, 1.0);
 }
 
 // --- Tests ---
@@ -172,12 +196,51 @@ test "jitter: perfect periodic" {
 }
 
 test "beacon score: perfect beacon" {
-    const score = beaconScore(0.530, 1.0, 0.0);
+    const score = beaconScore(1.0, 1.0, 0.0);
     try std.testing.expectApproxEqAbs(score, 1.0, 0.001);
 }
 
 test "beacon score: random traffic" {
-    // jitter=1 -> jitter_norm = 0.5, so score = 0.30*0 + 0.50*0 + 0.20*0.5 = 0.1
+    // jitter=1 -> jitter_norm = 0.5, so score = 0.45*0 + 0.25*0 + 0.30*0.5 = 0.15
     const score = beaconScore(0.386, 0.0, 1.0);
-    try std.testing.expectApproxEqAbs(score, 0.1, 0.001);
+    try std.testing.expectApproxEqAbs(score, 0.15, 0.001);
+}
+
+test "beacon score: bursty overdispersion is penalized" {
+    // High LSR but CV=3 (bursts + long gaps): penalty must keep it below alert range
+    const score = beaconScore(0.85, 0.0, 3.0);
+    try std.testing.expect(score < 0.3);
+}
+
+test "periodicity: significance grows with evidence" {
+    var short: [11]f64 = undefined;
+    for (0..short.len) |i| short[i] = @as(f64, @floatFromInt(i)) * 60.0;
+    var long: [51]f64 = undefined;
+    for (0..long.len) |i| long[i] = @as(f64, @floatFromInt(i)) * 60.0;
+
+    const p_short = detectPeriodicity(&short);
+    const p_long = detectPeriodicity(&long);
+
+    try std.testing.expect(p_short.significance > 0);
+    try std.testing.expect(p_long.significance > p_short.significance);
+    try std.testing.expectApproxEqAbs(p_short.interval, 60.0, 0.001);
+    try std.testing.expectApproxEqAbs(p_long.interval, 60.0, 0.001);
+}
+
+test "periodicity: jittered beacon has no spurious peak" {
+    // 15% jitter via LCG: i.i.d. spacings have no real ACF structure, so the
+    // significance must be zero and the interval must fall back to the mean.
+    var ts: [40]f64 = undefined;
+    var t: f64 = 0;
+    var state: u64 = 12345;
+    for (0..ts.len) |i| {
+        ts[i] = t;
+        state = state *% 6364136223846793005 +% 1442695040888963407;
+        const u = @as(f64, @floatFromInt(state >> 11)) / @as(f64, @floatFromInt(@as(u64, 1) << 53));
+        t += 60.0 * (1.0 + 0.15 * (2.0 * u - 1.0));
+    }
+
+    const p = detectPeriodicity(&ts);
+    try std.testing.expectApproxEqAbs(p.significance, 0.0, 0.001);
+    try std.testing.expect(@abs(p.interval - 60.0) < 60.0 * 0.1);
 }

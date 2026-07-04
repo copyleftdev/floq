@@ -26,17 +26,17 @@ This is exactly what `floq` does to network traffic. C2 beacons are periodic dri
 
 | Metric | Origin | What it measures |
 |---|---|---|
-| **LSR** (Level Spacing Ratio) | Random matrix theory / SYK model | Whether inter-arrival times have hidden structure (GOE, r ~ 0.530) or are genuinely random (Poisson, r ~ 0.386) |
-| **ACF** (Autocorrelation Peak) | Floquet quasi-energy analysis | Periodicity detection — finds the dominant repeating interval even with heavy jitter |
-| **Jitter** (Coefficient of Variation) | Classical statistics | How regular the timing is — lower = more beacon-like |
+| **LSR** (Level Spacing Ratio) | Random matrix theory | Local regularity of consecutive inter-arrival times: Poisson traffic sits at r ≈ 0.386, a clean beacon approaches r = 1. Scale-invariant and robust to slow interval drift |
+| **Period significance** | Extreme-value-calibrated autocorrelation | Whether the spacing *sequence* has statistically real structure (repeating patterns, burst cycles) — the ACF peak is credited only above its max-of-noise floor, so evidence grows with sample count |
+| **Jitter** (Coefficient of Variation) | Classical statistics | How regular the timing is — lower = more beacon-like. CV > 1 (super-Poisson) is penalized: bursts and backoff retries are *more* irregular than random, which no periodic beacon is |
 
-These are combined into a composite score (0-1) with weights tuned against three real-world malware families:
+These are combined into a composite score (0-1):
 
 ```
-score = 0.30 * LSR_norm + 0.50 * ACF_norm + 0.20 * Jitter_norm
+score = 0.45 * LSR_norm + 0.25 * period_sig + 0.30 / (1 + CV) - 0.20 * overdispersion_penalty
 ```
 
-ACF is weighted highest because it proved to be the strongest discriminator across all tested malware families. The LSR normalization maps the Poisson-GOE range to [0,1]. The jitter uses smooth inverse decay (`1/(1+jitter)`) instead of hard clipping, because real C2 traffic is bursty.
+LSR and CV carry most of the discrimination — a beacon with independent per-sleep jitter (how Cobalt Strike works) produces i.i.d. spacings, so all of its signal lives in the spacing distribution, and a raw autocorrelation peak is mathematically incapable of adding evidence for it. The significance term exists for flows whose spacing sequence has *real* structure (e.g. the Neris C2's burst pattern scores 1.0), calibrated against the `sqrt(2 ln L / m)` noise floor so it never rewards small samples. The jitter term uses smooth inverse decay (`1/(1+CV)`), and the overdispersion penalty removes flood/burst/backoff flows that regularity metrics alone would misread.
 
 ## Validation
 
@@ -44,25 +44,26 @@ ACF is weighted highest because it proved to be the strongest discriminator acro
 
 | Dataset | Malware | C2 Type | Result |
 |---|---|---|---|
-| CTU-42 (Neris) | Kelihos P2P botnet | UDP beacon ~180s | **Top hit: score 0.887** — primary C2 server identified |
+| CTU-42 (Neris) | Kelihos P2P botnet | UDP beacon ~180s | **Top hit: score 0.816, period_sig 1.00** — primary C2 server is the *only* alert at t=0.6 |
 | CTU-48 (Sogou) | Chinese IRC malware | IRC persistent conn | **0 detections** — correct, IRC doesn't beacon |
-| CTU-46 (Virut) | Fast-flux IRC botnet | IRC + clickfraud | **2 borderline** (0.61) — clickfraud relay flagged |
+| CTU-46 (Virut) | Fast-flux IRC botnet | IRC + clickfraud | **0 detections** — correct, IRC doesn't beacon |
 
 ### Chaos needle test
 
 40,000+ packets of synthetic chaos (Poisson bursts, TCP floods, port scans, DNS storms, exponential backoff retries, drifting heartbeats, chatty microservices) with 5 beacons hidden inside at varying intervals and jitter levels.
 
 ```
-Chaos Needle Test — 10 seeds, threshold=0.5
+Chaos Needle Test — 5 seeds, threshold=0.5
 ══════════════════════════════════════════════
-  Needles found:     50/50 (100%)
-  Score range:       [0.517 - 0.688]
+  Needles found:     25/25 (100%)
+  Score range:       [0.569 - 0.718]
+  Avg false positives per seed:  2.2
 
   ALL SEEDS PASSED
 ══════════════════════════════════════════════
 ```
 
-The hardest needle — 300-second interval, 25% jitter, only 26 packets in a 2-hour capture — was found in every single run.
+The hardest needle — 300-second interval, 25% jitter, only 26 packets in a 2-hour capture — was found in every single run. The remaining false positives are the synthetic "drifting heartbeat" flows (monitoring agents with slow interval drift), which score just over threshold at 0.50–0.52 — genuinely beacon-adjacent traffic that sits below every real needle. The previous ACF-based scoring reported ~32 false positives per seed at this threshold; null-calibrating the periodicity term and penalizing overdispersion cut that by an order of magnitude while keeping 100% recall.
 
 ## Install
 
@@ -110,7 +111,7 @@ floq -r capture.pcap --allowlist internal-services.txt
 ### Output
 
 ```
-[FLOQ] score=0.887  95.211.58.97 -> 147.32.84.165:1293/udp  interval=199.6s  jitter=0.450  lsr=0.876  acf=0.927  n=84
+[FLOQ] score=0.816  95.211.58.97 -> 147.32.84.165:1293/udp  interval=199.6s  jitter=0.450  lsr=0.876  period_sig=1.000  n=84
 ```
 
 JSON (`--json`) and CSV (`--csv`) output modes available. Stats printed to stderr on exit:
@@ -198,23 +199,21 @@ floq (274KB)
 
 ## The science
 
-The level spacing ratio comes from random matrix theory. In quantum chaos, the eigenvalue spacings of a Hamiltonian follow one of two universal distributions:
+The level spacing ratio comes from random matrix theory, where it classifies spectra by the statistics of consecutive spacings. Two anchors matter here:
 
-- **Poisson** (r ~ 0.386): eigenvalues are uncorrelated — the system is integrable
-- **GOE** (r ~ 0.530): eigenvalues repel — the system is chaotic (structured)
+- **Poisson** (r = 2ln2−1 ≈ 0.386): spacings are uncorrelated exponentials — genuinely random arrivals
+- **Picket fence** (r → 1): spacings are all equal — a periodic driver
 
-This classification applies to any sequence of events. Network connection timestamps from random user activity follow Poisson statistics. Timestamps from a periodic C2 beacon — even with significant jitter — exhibit GOE-class level repulsion because consecutive spacings are correlated.
+Network connection timestamps from random user activity follow Poisson statistics and sit at the 0.386 anchor. A periodic C2 beacon sits near the picket-fence limit, and jitter pulls it back toward Poisson: a 15%-jitter beacon measures r ≈ 0.91, a 50%-jitter beacon r ≈ 0.73. `floq` scores the distance from the Poisson null toward the picket-fence limit. (The GOE value 0.5307 familiar from quantum chaos sits between the two anchors, but beacons are picket-fence-class, not GOE — periodic timing is regular, not level-repelling.)
 
-The key insight: LSR is invariant to the absolute scale of intervals. A beacon at 10-second intervals and one at 300-second intervals produce the same LSR if they have the same jitter profile. This makes it robust across C2 configurations.
+Two properties make the r-statistic well suited to C2 detection. It is invariant to the absolute scale of intervals — a beacon at 10-second and one at 300-second intervals produce the same r for the same jitter profile. And it is purely local (ratios of *consecutive* spacings), so a beacon whose interval drifts over hours keeps a high r while its global CV degrades.
 
-The autocorrelation component is directly inspired by Floquet quasi-energy analysis. In periodically driven quantum systems, the Floquet operator's eigenvalue spectrum reveals the driving period even when the dynamics look chaotic. Applied to inter-arrival time spacings, the autocorrelation peak finder does the same decomposition — extracting the dominant period from noisy timing data.
+The period-significance component is classical time-series analysis with extreme-value calibration. A subtle point drives the design: a beacon with independent per-sleep jitter produces i.i.d. spacings, whose autocorrelation is zero at every lag — the periodicity of the *events* leaves no trace in the ACF of the *spacings*. A raw ACF peak is therefore just the maximum of many noise estimates (which concentrates at `sqrt(2 ln L / m)` and *shrinks* with more data). `floq` subtracts that noise floor and credits only the statistically significant excess — real repeating structure in the spacing sequence, like the burst cycles of the Neris C2 protocol.
 
 ### References
 
-1. Sachdev, S. & Ye, J. (1993). *Gapless spin-fluid ground state in a random quantum Heisenberg magnet*. Phys. Rev. Lett.
-2. Kitaev, A. (2015). *A simple model of quantum holography*. KITP talks.
-3. Oganesyan, V. & Huse, D. (2007). *Localization of interacting fermions at high temperature*. Phys. Rev. B — introduced the level spacing ratio diagnostic.
-4. Atas, Y.Y. et al. (2013). *Distribution of the ratio of consecutive level spacings in random matrix ensembles*. Phys. Rev. Lett.
+1. Oganesyan, V. & Huse, D. (2007). *Localization of interacting fermions at high temperature*. Phys. Rev. B — introduced the level spacing ratio diagnostic.
+2. Atas, Y.Y. et al. (2013). *Distribution of the ratio of consecutive level spacings in random matrix ensembles*. Phys. Rev. Lett. — the Poisson value 2ln2−1 used as the null anchor.
 
 ## Testing
 

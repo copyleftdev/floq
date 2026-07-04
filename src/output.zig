@@ -12,7 +12,7 @@ pub fn writeResult(writer: Writer, result: types.BeaconResult, format: types.Con
 }
 
 pub fn writeCsvHeader(writer: Writer) !void {
-    try writer.writeAll("score,src_ip,dst_ip,dst_port,proto,interval,jitter,lsr,acf,samples\n");
+    try writer.writeAll("score,src_ip,dst_ip,dst_port,proto,interval,jitter,lsr,period_sig,samples\n");
 }
 
 fn writeHuman(writer: Writer, r: types.BeaconResult) !void {
@@ -20,13 +20,13 @@ fn writeHuman(writer: Writer, r: types.BeaconResult) !void {
     try types.formatAddr(r.flow.src_addr, writer);
     try writer.writeAll(" -> ");
     try types.formatAddr(r.flow.dst_addr, writer);
-    try writer.print(":{d}/{s}  interval={d:.1}s  jitter={d:.3}  lsr={d:.3}  acf={d:.3}  n={d}\n", .{
+    try writer.print(":{d}/{s}  interval={d:.1}s  jitter={d:.3}  lsr={d:.3}  period_sig={d:.3}  n={d}\n", .{
         r.flow.dst_port,
         types.protocolName(r.flow.protocol),
         r.estimated_interval,
         r.jitter_ratio,
         r.lsr,
-        r.autocorrelation_peak,
+        r.period_significance,
         r.sample_count,
     });
 }
@@ -36,13 +36,13 @@ fn writeJson(writer: Writer, r: types.BeaconResult) !void {
     try types.formatAddr(r.flow.src_addr, writer);
     try writer.print("\",\"dst\":\"", .{});
     try types.formatAddr(r.flow.dst_addr, writer);
-    try writer.print("\",\"port\":{d},\"proto\":\"{s}\",\"interval\":{d:.2},\"jitter\":{d:.4},\"lsr\":{d:.4},\"acf\":{d:.4},\"samples\":{d}}}\n", .{
+    try writer.print("\",\"port\":{d},\"proto\":\"{s}\",\"interval\":{d:.2},\"jitter\":{d:.4},\"lsr\":{d:.4},\"period_sig\":{d:.4},\"samples\":{d}}}\n", .{
         r.flow.dst_port,
         types.protocolName(r.flow.protocol),
         r.estimated_interval,
         r.jitter_ratio,
         r.lsr,
-        r.autocorrelation_peak,
+        r.period_significance,
         r.sample_count,
     });
 }
@@ -58,7 +58,7 @@ fn writeCsv(writer: Writer, r: types.BeaconResult) !void {
         r.estimated_interval,
         r.jitter_ratio,
         r.lsr,
-        r.autocorrelation_peak,
+        r.period_significance,
         r.sample_count,
     });
 }
