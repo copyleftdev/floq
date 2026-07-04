@@ -88,7 +88,7 @@ pub const Detector = struct {
             const lsr = spectral.levelSpacingRatio(ts) orelse continue;
             const periodicity = spectral.detectPeriodicity(ts);
             const jitter = spectral.jitterRatio(ts);
-            const score = spectral.beaconScore(lsr, periodicity.peak, jitter);
+            const score = spectral.beaconScore(lsr, periodicity.significance, jitter);
 
             if (score >= self.config.threshold) {
                 const cooldown = self.config.analysis_interval * 3;
@@ -100,7 +100,7 @@ pub const Detector = struct {
                     .sample_count = ts.len,
                     .lsr = lsr,
                     .estimated_interval = periodicity.interval,
-                    .autocorrelation_peak = periodicity.peak,
+                    .period_significance = periodicity.significance,
                     .jitter_ratio = jitter,
                     .score = score,
                 });

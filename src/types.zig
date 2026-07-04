@@ -64,7 +64,7 @@ pub const BeaconResult = struct {
     sample_count: usize,
     lsr: f64,
     estimated_interval: f64,
-    autocorrelation_peak: f64,
+    period_significance: f64,
     jitter_ratio: f64,
     score: f64,
 };
