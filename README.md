@@ -1,24 +1,18 @@
 # floq
 
-A C2 beacon detector built on Floquet spectral analysis — the physics of finding periodic signals hidden in chaos.
+A C2 beacon detector that borrows the spectral statistics quantum-chaos physicists use to tell structured signals from noise — applied to network flow timing.
 
-**274KB static binary. Reads pcap, live capture, or OpenTelemetry JSONL. Finds needles in chaos.**
+**276KB static binary. Reads pcap, live capture, or OpenTelemetry JSONL. Finds needles in chaos.**
 
 ## Why this exists
 
-Every beacon detection tool in the security industry uses the same approach: standard deviation and coefficient of variation on connection intervals. RITA, Flare, BeaconHunter — they all compute `stddev / mean` and call it a day. This works for textbook beacons with low jitter, but real C2 traffic is bursty, jittered, and buried in noise. A 15% jitter Cobalt Strike beacon mixed into a busy network looks like random traffic to a stddev-based detector.
+Most beacon detection tools use one signal: standard deviation and coefficient of variation on connection intervals. RITA, Flare, BeaconHunter — they compute `stddev / mean` and threshold it. That works for textbook beacons with low jitter, but real C2 traffic is bursty, jittered, and buried in noise. A 15%-jitter Cobalt Strike beacon in a busy network looks a lot like ordinary traffic to a CV-only detector, and long-interval drift degrades CV even for clean beacons.
 
-We looked at this problem and asked: who else detects hidden periodic signals in noisy data?
-
-Physicists. Specifically, quantum chaos researchers.
-
-Nobody had built this bridge from physics to security. So we researched it, tested it against real malware, stress-tested it against synthetic chaos, and shipped it.
+The question `floq` starts from: who else has to separate a faint periodic signal from a noisy background? Physicists — specifically the random-matrix-theory diagnostics from quantum chaos, which classify a sequence of levels as *random* or *structured* from the statistics of their spacings alone. The **level spacing ratio** turns out to be a well-behaved, scale-invariant, drift-robust regularity measure for network timing, and it does most of the work here. `floq` pairs it with a coefficient-of-variation term and a null-calibrated periodicity check, then combines the three.
 
 ## The name
 
-**Floquet** (flo-KAY) — from Gaston Floquet's mathematical framework for analyzing periodic systems. Floquet theory says: any system driven by a periodic force, no matter how complex or noisy, has a fundamental periodic structure that can be decomposed and identified. The Floquet operator captures what happens over exactly one period. The quasi-energies reveal hidden periodicities even when the raw signal looks chaotic.
-
-This is exactly what `floq` does to network traffic. C2 beacons are periodic drivers. Network noise is the complex system. Floquet analysis decomposes the chaos and finds the period.
+**Floquet** (flo-KAY) — Gaston Floquet's framework for periodically driven systems, where a hidden fundamental period survives even in complex, noisy dynamics. It's the inspiration for the periodicity component and a fitting name for a beacon finder. To be precise about what the tool actually computes: `floq` does *not* build a Floquet operator or diagonalize a quasi-energy spectrum. It computes classical spectral and time-series statistics on inter-arrival timing (see [How it works](#how-it-works) and [The science](#the-science)). The physics is where the ideas come from, not a literal simulation running under the hood.
 
 ## How it works
 
@@ -44,7 +38,7 @@ LSR and CV carry most of the discrimination — a beacon with independent per-sl
 
 | Dataset | Malware | C2 Type | Result |
 |---|---|---|---|
-| CTU-42 (Neris) | Kelihos P2P botnet | UDP beacon ~180s | **Top hit: score 0.816, period_sig 1.00** — primary C2 server is the *only* alert at t=0.6 |
+| CTU-42 (Neris) | Neris botnet | UDP beacon ~180s | **Top hit: score 0.816, period_sig 1.00** — primary C2 server is the *only* flow alerted at t=0.6 |
 | CTU-48 (Sogou) | Chinese IRC malware | IRC persistent conn | **0 detections** — correct, IRC doesn't beacon |
 | CTU-46 (Virut) | Fast-flux IRC botnet | IRC + clickfraud | **0 detections** — correct, IRC doesn't beacon |
 
@@ -53,17 +47,17 @@ LSR and CV carry most of the discrimination — a beacon with independent per-sl
 40,000+ packets of synthetic chaos (Poisson bursts, TCP floods, port scans, DNS storms, exponential backoff retries, drifting heartbeats, chatty microservices) with 5 beacons hidden inside at varying intervals and jitter levels.
 
 ```
-Chaos Needle Test — 5 seeds, threshold=0.5
+Chaos Needle Test — 10 seeds, threshold=0.5
 ══════════════════════════════════════════════
-  Needles found:     25/25 (100%)
-  Score range:       [0.569 - 0.718]
-  Avg false positives per seed:  2.2
+  Needles found:     50/50 (100%)
+  Score range:       [0.562 - 0.718]
+  Avg false positives per seed:  1.9
 
   ALL SEEDS PASSED
 ══════════════════════════════════════════════
 ```
 
-The hardest needle — 300-second interval, 25% jitter, only 26 packets in a 2-hour capture — was found in every single run. The remaining false positives are the synthetic "drifting heartbeat" flows (monitoring agents with slow interval drift), which score just over threshold at 0.50–0.52 — genuinely beacon-adjacent traffic that sits below every real needle. The previous ACF-based scoring reported ~32 false positives per seed at this threshold; null-calibrating the periodicity term and penalizing overdispersion cut that by an order of magnitude while keeping 100% recall.
+The hardest needle — 300-second interval, 25% jitter, only 26 packets in a 2-hour capture — was found in every single run. The remaining false positives are the synthetic "drifting heartbeat" flows (monitoring agents with slow interval drift), which land just over threshold at 0.50–0.52 — genuinely beacon-adjacent traffic that sits below every real needle. The previous ACF-based scoring produced roughly 30 false positives per seed at this threshold; null-calibrating the periodicity term and penalizing overdispersion cut that by an order of magnitude while keeping 100% recall.
 
 ## Install
 
@@ -72,11 +66,11 @@ Requires [Zig](https://ziglang.org/download/) >= 0.14.0 and libpcap-dev.
 ```bash
 sudo apt install libpcap-dev    # Debian/Ubuntu
 
-git clone https://github.com/YOURUSER/floq.git
+git clone https://github.com/copyleftdev/floq.git
 cd floq
 zig build -Doptimize=ReleaseSafe
 
-# Binary at zig-out/bin/floq (274KB)
+# Binary at zig-out/bin/floq (~276KB)
 ```
 
 ### Verify
@@ -121,7 +115,7 @@ JSON (`--json`) and CSV (`--csv`) output modes available. Stats printed to stder
 duration:  1s
 packets:   322248 processed, 906 skipped
 flows:     9004 active
-alerts:    19
+alerts:    2
 ```
 
 ### Options
@@ -177,12 +171,12 @@ IPv6 works in both pcap and JSONL modes:
 ## Architecture
 
 ```
-floq (274KB)
+floq (~276KB)
 ├── main.zig        Event loop, CLI, signal handling, stats
 ├── capture.zig     libpcap: Ethernet/VLAN/IPv4/IPv6 parsing
 ├── ingest.zig      JSONL stdin reader with OTel support
 ├── detector.zig    Per-flow state, sliding window, LRU eviction
-├── spectral.zig    LSR, autocorrelation, jitter, Floquet scoring
+├── spectral.zig    Level spacing ratio, jitter, periodicity significance, composite score
 ├── allowlist.zig   Built-in + file-based allowlists
 ├── output.zig      Human/JSON/CSV formatters, exit stats
 └── types.zig       FlowKey ([16]u8 addrs), Config
