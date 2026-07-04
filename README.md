@@ -39,8 +39,8 @@ LSR and CV carry most of the discrimination — a beacon with independent per-sl
 | Dataset | Malware | C2 Type | Result |
 |---|---|---|---|
 | CTU-42 (Neris) | Neris botnet | UDP beacon ~180s | **Top hit: score 0.816, period_sig 1.00** — primary C2 server is the *only* flow alerted at t=0.6 |
-| CTU-48 (Sogou) | Chinese IRC malware | IRC persistent conn | **0 detections** — correct, IRC doesn't beacon |
-| CTU-46 (Virut) | Fast-flux IRC botnet | IRC + clickfraud | **0 detections** — correct, IRC doesn't beacon |
+| CTU-46 (Virut) | Virut | IRC C2 + fast-flux, spam | **0 detections** — correct, no fixed-interval beacon |
+| CTU-48 (Sogou) | Sogou | IRC + HTTP + DNS, spam/clickfraud | **0 detections** — correct, no fixed-interval beacon |
 
 ### Chaos needle test
 
