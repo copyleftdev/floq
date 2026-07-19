@@ -1,5 +1,7 @@
 # floq
 
+[![Tip my tokens](https://tokentip.to/badge/copyleftdev.svg?logo=1)](https://tokentip.to/@copyleftdev)
+
 A C2 beacon detector that borrows the spectral statistics quantum-chaos physicists use to tell structured signals from noise — applied to network flow timing.
 
 **276KB static binary. Reads pcap, live capture, or OpenTelemetry JSONL. Finds needles in chaos.**
